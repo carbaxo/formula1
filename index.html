@@ -362,10 +362,31 @@
       .control-btn { width: 76px; height: 76px; }
     }
 
-    /* Smaller phones in landscape: keep controls reachable */
-    @media (max-height: 480px) {
-      .pad { gap: 10px; }
+    /* In-game landscape on phones: bigger thumb controls and a compact HUD
+       that hugs the corners so it stays clear of the track. */
+    @media (pointer: coarse) and (orientation: landscape) {
+      .hud { gap: 8px; align-items: flex-start; }
+      .hud .panel:first-child { display: none; }        /* hide the title card while racing */
+      .panel { padding: 8px 12px; background: rgba(18, 22, 36, 0.62); }
+      .stats {
+        flex: 0 0 auto;
+        grid-template-columns: repeat(4, auto);
+        gap: 2px 16px;
+      }
+      .stat { padding-left: 10px; }
+      .stat strong { font-size: 15px; }
+      .stat .label { font-size: 9px; }
+      .leaderboard { flex: 0 0 auto; margin-left: auto; }
+      .leader-row { font-size: 11px; margin-bottom: 3px; }
+
+      .pad { gap: 16px; }
+      .control-btn { width: 78px; height: 78px; font-size: 26px; }
+    }
+
+    /* Very short screens (small phones in landscape): trim controls so they fit. */
+    @media (pointer: coarse) and (orientation: landscape) and (max-height: 380px) {
       .control-btn { width: 64px; height: 64px; font-size: 22px; border-radius: 14px; }
+      .pad { gap: 10px; }
     }
     .overlay {
       position: absolute;
