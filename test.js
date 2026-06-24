@@ -1105,6 +1105,16 @@
 
     requestAnimationFrame(tick);
 
+    // Best-effort: lock to landscape where supported (installed PWA / fullscreen on Android).
+    // iOS ignores this; there the rotate overlay guides the player instead.
+    function lockLandscape() {
+      if (screen.orientation && screen.orientation.lock) {
+        screen.orientation.lock("landscape").catch(() => {});
+      }
+    }
+    lockLandscape();
+    window.addEventListener("orientationchange", lockLandscape);
+
     // Register the service worker so the game is installable as a PWA and works offline.
     if ("serviceWorker" in navigator) {
       window.addEventListener("load", () => {
