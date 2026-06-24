@@ -1102,6 +1102,15 @@
     resetGame(true);
     gameState = "MENU";
     document.getElementById("menu-overlay").classList.remove("hidden");
-    
+
     requestAnimationFrame(tick);
+
+    // Register the service worker so the game is installable as a PWA and works offline.
+    if ("serviceWorker" in navigator) {
+      window.addEventListener("load", () => {
+        navigator.serviceWorker.register("sw.js").catch((err) => {
+          console.warn("Service worker registration failed:", err);
+        });
+      });
+    }
   

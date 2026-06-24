@@ -7,7 +7,11 @@
   <meta name="mobile-web-app-capable" content="yes" />
   <meta name="apple-mobile-web-app-capable" content="yes" />
   <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+  <meta name="apple-mobile-web-app-title" content="Apex Racing" />
   <title>Apex Racing · F1</title>
+  <link rel="manifest" href="manifest.webmanifest" />
+  <link rel="icon" type="image/png" sizes="192x192" href="icon-192.png" />
+  <link rel="apple-touch-icon" href="apple-touch-icon.png" />
   <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;500;700;900&display=swap" rel="stylesheet">
   <style>
     :root {
@@ -1616,8 +1620,17 @@
     resetGame(true);
     gameState = "MENU";
     document.getElementById("menu-overlay").classList.remove("hidden");
-    
+
     requestAnimationFrame(tick);
+
+    // Register the service worker so the game is installable as a PWA and works offline.
+    if ("serviceWorker" in navigator) {
+      window.addEventListener("load", () => {
+        navigator.serviceWorker.register("sw.js").catch((err) => {
+          console.warn("Service worker registration failed:", err);
+        });
+      });
+    }
   </script>
 </body>
 </html>
