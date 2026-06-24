@@ -1,6 +1,6 @@
 // Service worker for Apex Racing PWA.
 // Bump CACHE on each release so clients pick up new assets.
-const CACHE = "apex-racing-v6";
+const CACHE = "apex-racing-v7";
 const ASSETS = [
   "./",
   "./index.html",
