@@ -140,6 +140,8 @@
         y,
         angle,
         speed: 0,
+        vx: 0,
+        vy: 0,
         color,
         name,
         width: 36,
@@ -165,7 +167,11 @@
       if (a.lap !== b.lap) return b.lap - a.lap;
       if (a.finished && b.finished) return a.finishTime - b.finishTime;
       if (a.finished !== b.finished) return a.finished ? -1 : 1;
-      if (a.nextCheckpoint !== b.nextCheckpoint) return b.nextCheckpoint - a.nextCheckpoint;
+      // A car that has cleared every checkpoint this lap (lapReady) is ahead of
+      // one still collecting them, even though its nextCheckpoint wrapped to 0.
+      const pa = a.lapReady ? checkpoints.length : a.nextCheckpoint;
+      const pb = b.lapReady ? checkpoints.length : b.nextCheckpoint;
+      if (pa !== pb) return pb - pa;
       const cpA = checkpoints[a.nextCheckpoint];
       const cpB = checkpoints[b.nextCheckpoint];
       const distA = cpA ? distance(a.x, a.y, cpA.x, cpA.y) : 0;
@@ -227,6 +233,7 @@
         const car = createCar(p.x, p.y, 0, data.color, data.name);
         car.isAI = true;
         car.aiSkill = data.skill;
+        car.aiIndex = 1;   // aim down the start straight, not back at the line
         car.lapStartTime = 0;
         car.totalPoints = tournamentStandings.find(s => s.name === data.name)?.points || 0;
         return car;
@@ -497,110 +504,131 @@
 
     function updateCar(car, dt, controls) {
       const onTrack = nearestTrackInfo(car.x, car.y).distSq <= (track.roadWidth * 0.5) ** 2;
-      const grip = onTrack ? 1 : 0.55;
-      const maxSpeed = onTrack ? 420 : 250;
-      const acceleration = onTrack ? 250 : 120;
-      const braking = 340;
-      const friction = onTrack ? 82 : 48;
+
+      // Engine model (scalar speed along the car's heading).
+      const maxSpeed = onTrack ? 430 : 215;     // grass severely limits top speed
+      const accelBase = onTrack ? 300 : 120;
+      const braking = 450;
+      const drag = onTrack ? 14 : 150;           // off-track drags hard (gravel trap feel)
+      const rollFriction = onTrack ? 36 : 95;
 
       if (controls) {
-        if (controls.up) car.speed += acceleration * dt;
+        if (controls.up) {
+          // Acceleration tapers near top speed — a real engine power curve.
+          const accel = accelBase * Math.max(0.15, 1 - Math.max(0, car.speed) / (maxSpeed * 1.1));
+          car.speed += accel * dt;
+        }
         if (controls.down) car.speed -= braking * dt;
-        
+
         const targetTurn = (controls.left ? -1 : 0) + (controls.right ? 1 : 0);
-        // Smoothly interpolate the steering input for more progressive turning
-        const steerResponsiveness = 5.0; // How fast the wheel returns/turns
-        car.steerView = lerp(car.steerView, targetTurn, dt * steerResponsiveness);
-        
-        const steerPower = 2.8 + Math.min(3.2, Math.abs(car.speed) / 80);
-        car.angle += car.steerView * steerPower * dt * (car.speed >= 0 ? 1 : -1);
-      } else {
-        // For AI or other, return steering to center
-        car.steerView = lerp(car.steerView, 0, dt * 5.0);
+        car.steerView = lerp(car.steerView, targetTurn, dt * 6.5);
+      } else if (!car.isAI) {
+        car.steerView = lerp(car.steerView, 0, dt * 6.0);
       }
 
-      car.speed -= Math.sign(car.speed) * friction * dt;
-      const isDriving = (controls && (controls.up || controls.down)) || (car.isAI && !car.finished);
-      if (!isDriving && Math.abs(car.speed) < 5) {
-        car.speed = 0;
+      // Rolling resistance + quadratic-ish drag (more bite at speed).
+      car.speed -= Math.sign(car.speed) * (rollFriction + drag * Math.abs(car.speed) / maxSpeed) * dt;
+
+      // Steering: yaw rate is high at moderate speed, eases a touch at the very top
+      // (you need more room at speed). A near-stationary car barely rotates.
+      if (controls) {
+        const turnability = clamp(Math.abs(car.speed) / 55, 0, 1);
+        const steerRate = 3.5 - 1.1 * Math.min(1, Math.abs(car.speed) / 360);
+        car.angle += car.steerView * steerRate * dt * turnability * (car.speed >= 0 ? 1 : -1);
+        // Tyre scrub: hard cornering at speed bleeds energy (rewards smooth lines).
+        const scrub = Math.abs(car.steerView) * Math.min(1, Math.abs(car.speed) / 280);
+        car.speed -= scrub * 70 * dt;
       }
+
+      const isDriving = (controls && (controls.up || controls.down)) || (car.isAI && !car.finished);
+      if (!isDriving && Math.abs(car.speed) < 5) car.speed = 0;
       car.speed = clamp(car.speed, -90, maxSpeed);
 
-      car.x += Math.cos(car.angle) * car.speed * dt * grip;
-      car.y += Math.sin(car.angle) * car.speed * dt * grip;
+      // Velocity vector with grip: actual motion lags the heading, so the car
+      // carries momentum and drifts/understeers — strong grip on asphalt, loose
+      // on grass. This is what makes it feel like a car and not a cursor.
+      const hx = Math.cos(car.angle);
+      const hy = Math.sin(car.angle);
+      const gripK = onTrack ? 9.0 : 2.3;
+      const g = 1 - Math.exp(-gripK * dt);
+      car.vx = lerp(car.vx, hx * car.speed, g);
+      car.vy = lerp(car.vy, hy * car.speed, g);
+
+      car.x += car.vx * dt;
+      car.y += car.vy * dt;
       car.x = clamp(car.x, 40, world.width - 40);
       car.y = clamp(car.y, 40, world.height - 40);
 
+      // Slip detection for tyre-smoke FX: how sideways the car is moving.
+      const speedMag = Math.hypot(car.vx, car.vy);
+      const slip = speedMag > 40 ? Math.abs(car.vx * -hy + car.vy * hx) : 0;
+
       if (!onTrack) {
-        car.speed *= 0.985;
-        if (Math.abs(car.speed) > 50 && Math.random() > 0.5) {
-          particles.push(new Particle(car.x, car.y, (Math.random()-0.5)*40, (Math.random()-0.5)*40, "rgba(255,255,255,0.4)", 0.6, 5));
+        if (speedMag > 45 && Math.random() > 0.45) {
+          particles.push(new Particle(car.x, car.y, (Math.random()-0.5)*40, (Math.random()-0.5)*40, "rgba(210,180,130,0.5)", 0.6, 5));
         }
-      } else if (Math.abs(car.speed) > 280 && Math.random() > 0.92) {
-         particles.push(new Particle(car.x, car.y, (Math.random()-0.5)*20, (Math.random()-0.5)*20, "rgba(200,200,200,0.15)", 0.4, 3));
+      } else if ((slip > 70 || Math.abs(car.speed) > 300) && Math.random() > 0.82) {
+        particles.push(new Particle(car.x, car.y, (Math.random()-0.5)*20, (Math.random()-0.5)*20, "rgba(200,200,200,0.18)", 0.45, 3));
       }
     }
 
     function updateAI(car, dt) {
       if (car.finished) {
-        car.speed *= 0.95;
+        car.speed *= 0.96;
         updateCar(car, dt, null);
         return;
       }
-      
-      const target = track.waypoints[car.aiIndex];
-      const nextTarget = track.waypoints[(car.aiIndex + 1) % track.waypoints.length];
-      
-      // Calculate target angle
+
+      const wps = track.waypoints;
+      const target = wps[car.aiIndex];
+      const nextTarget = wps[(car.aiIndex + 1) % wps.length];
+
+      // Steer toward the current waypoint, rate limited by skill.
       const dx = target.x - car.x;
       const dy = target.y - car.y;
       const targetAngle = Math.atan2(dy, dx);
-      
-      // Steering logic with skill factor
-      let diff = targetAngle - car.angle;
-      diff = Math.atan2(Math.sin(diff), Math.cos(diff));
-      const steerSpeed = 3.2 * car.aiSkill; 
+      let diff = Math.atan2(Math.sin(targetAngle - car.angle), Math.cos(targetAngle - car.angle));
+      const steerSpeed = 3.0 + 0.6 * (car.aiSkill - 1);
       car.angle += clamp(diff, -steerSpeed * dt, steerSpeed * dt);
 
-      // Speed logic: Look ahead for corners
       const distToTarget = distance(car.x, car.y, target.x, target.y);
-      const distToNext = distance(target.x, target.y, nextTarget.x, nextTarget.y);
-      
-      // Simple cornering detection (angle between current and next segment)
-      const angle1 = Math.atan2(target.y - car.y, target.x - car.x);
-      const angle2 = Math.atan2(nextTarget.y - target.y, nextTarget.x - target.x);
-      let turnSharpness = Math.abs(Math.atan2(Math.sin(angle2-angle1), Math.cos(angle2-angle1)));
-      
-      let maxDesiredSpeed = 415 * car.aiSkill;
-      if (turnSharpness > 0.4 && distToTarget < 200) {
-        maxDesiredSpeed = 280 * (1 - turnSharpness * 0.3) * car.aiSkill;
+
+      // How sharp is the upcoming corner (current -> target -> next)?
+      const a1 = Math.atan2(target.y - car.y, target.x - car.x);
+      const a2 = Math.atan2(nextTarget.y - target.y, nextTarget.x - target.x);
+      const turnSharpness = Math.abs(Math.atan2(Math.sin(a2 - a1), Math.cos(a2 - a1)));
+
+      // Target speed sits just around the player's range so the AI is competitive
+      // but beatable; it brakes for corners instead of coasting.
+      const topSpeed = 430 * clamp(0.88 + (car.aiSkill - 1) * 0.16, 0.84, 1.05);
+      let desired = topSpeed;
+      if (turnSharpness > 0.35 && distToTarget < 320) {
+        desired = topSpeed * clamp(1 - turnSharpness * 0.5, 0.34, 1);
       }
 
-      if (car.speed < maxDesiredSpeed) {
-        car.speed += 220 * car.aiSkill * dt;
+      if (car.speed < desired) {
+        car.speed += 250 * dt;
       } else {
-        car.speed -= 100 * dt;
+        car.speed -= 320 * dt;   // brake into the corner
       }
-      
-      car.speed = clamp(car.speed, 0, 425 * car.aiSkill);
+      car.speed = clamp(car.speed, 0, topSpeed);
 
       updateCar(car, dt, null);
 
-      if (distToTarget < 85) {
-        car.aiIndex = (car.aiIndex + 1) % track.waypoints.length;
+      if (distToTarget < 110) {
+        car.aiIndex = (car.aiIndex + 1) % wps.length;
       }
     }
 
     function updateCheckpoints(car) {
       const next = checkpoints[car.nextCheckpoint];
       if (distance(car.x, car.y, next.x, next.y) < 250) {
-        car.checkpointsCleared++;
         car.nextCheckpoint = (car.nextCheckpoint + 1) % checkpoints.length;
-        
-        // Logical validation: pass at least half checkpoints to allow lap completion
-        if (car.checkpointsCleared >= checkpoints.length * 0.7) {
-          car.lapReady = true;
-        }
+        car.checkpointsCleared++;
+        // A lap only becomes valid once EVERY checkpoint of this lap has been
+        // passed in order (the sequence wraps back to the first one). The lap is
+        // then counted when the car actually crosses the finish line.
+        if (car.nextCheckpoint === 0) car.lapReady = true;
       }
     }
 
@@ -638,7 +666,9 @@
 
     function resolveCollisions() {
       const allCars = [player, ...ais];
-      const collisionRadius = 45; // Based on car length/width
+      const carRadius = 26;            // ~half a car body
+      const minDist = carRadius * 2;
+      const restitution = 0.32;        // how bouncy the impact is
 
       for (let i = 0; i < allCars.length; i++) {
         for (let j = i + 1; j < allCars.length; j++) {
@@ -646,42 +676,46 @@
           const b = allCars[j];
           const dx = b.x - a.x;
           const dy = b.y - a.y;
-          const dist = Math.hypot(dx, dy);
-          const minDist = collisionRadius;
+          let dist = Math.hypot(dx, dy);
+          if (dist === 0) dist = 0.01;
+          if (dist >= minDist) continue;
 
-          if (dist < minDist) {
-            // Collision detected
-            const angle = Math.atan2(dy, dx);
-            const overlap = minDist - dist;
-            
-            // Push them apart
-            const pushX = Math.cos(angle) * overlap * 0.5;
-            const pushY = Math.sin(angle) * overlap * 0.5;
-            
-            a.x -= pushX;
-            a.y -= pushY;
-            b.x += pushX;
-            b.y += pushY;
+          // Contact normal (from a to b).
+          const nx = dx / dist;
+          const ny = dy / dist;
+          const overlap = minDist - dist;
 
-            // Energetic bounce
-            const tempSpeed = a.speed;
-            // Exchange and add a little 'kick' away from the collision
-            a.speed = (b.speed * 0.95);
-            b.speed = (tempSpeed * 0.95);
-            
-            // Give them a tiny nudge in their new direction to prevent sticking
-            a.x -= Math.cos(angle) * 2;
-            a.y -= Math.sin(angle) * 2;
-            b.x += Math.cos(angle) * 2;
-            b.y += Math.sin(angle) * 2;
+          // Separate the two cars so they no longer overlap.
+          const sep = overlap / 2 + 0.5;
+          a.x -= nx * sep; a.y -= ny * sep;
+          b.x += nx * sep; b.y += ny * sep;
 
-            // Visual feedback (sparks/smoke)
-            if (Math.abs(a.speed - b.speed) > 50) {
-              for (let k = 0; k < 5; k++) {
+          // Impulse along the normal (equal mass, partially elastic).
+          const rvx = b.vx - a.vx;
+          const rvy = b.vy - a.vy;
+          const vn = rvx * nx + rvy * ny;     // closing speed (negative = approaching)
+          if (vn < 0) {
+            const jImp = -(1 + restitution) * vn / 2;
+            const ix = jImp * nx;
+            const iy = jImp * ny;
+            a.vx -= ix; a.vy -= iy;
+            b.vx += ix; b.vy += iy;
+
+            // Re-sync each engine speed to the new forward velocity so a hit
+            // actually slows you down / shoves you forward.
+            a.speed = a.vx * Math.cos(a.angle) + a.vy * Math.sin(a.angle);
+            b.speed = b.vx * Math.cos(b.angle) + b.vy * Math.sin(b.angle);
+
+            // Sparks scale with the violence of the impact.
+            const impact = -vn;
+            if (impact > 60) {
+              const n = Math.min(10, Math.round(impact / 40));
+              for (let k = 0; k < n; k++) {
                 particles.push(new Particle(
-                  (a.x + b.x)/2, (a.y + b.y)/2, 
-                  (Math.random()-0.5)*100, (Math.random()-0.5)*100, 
-                  "#fff", 0.3, 3
+                  (a.x + b.x) / 2, (a.y + b.y) / 2,
+                  (Math.random() - 0.5) * impact * 1.5,
+                  (Math.random() - 0.5) * impact * 1.5,
+                  Math.random() > 0.5 ? "#ffcc33" : "#fff", 0.35, 3
                 ));
               }
             }
